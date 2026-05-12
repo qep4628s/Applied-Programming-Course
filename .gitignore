@@ -10,3 +10,4 @@ __pycache__/
 *.db
 notes.db
 data/notes.json
+P.py
