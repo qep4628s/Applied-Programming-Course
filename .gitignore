@@ -4,4 +4,9 @@ day-*-presentation.md
 !day-01-presentation.md
 !day-02-presentation.md
 !day-03-presentation.md
-
+.venv/
+__pycache__/
+*.pyc
+*.db
+notes.db
+data/notes.json

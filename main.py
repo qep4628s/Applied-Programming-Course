@@ -1,216 +1,488 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from datetime import datetime, timezone
-import json
-from pathlib import Path
-from typing import Optional
-
-
+from fastapi import FastAPI, HTTPException, Depends
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field as PydanticField,
+    field_validator,
+)
+from sqlmodel import (
+    SQLModel,
+    Field as SQLField,
+    Session,
+    create_engine,
+    Relationship,
+    select,
+    or_,
+    col,
+)
+from datetime import datetime
+from typing import Optional, Annotated
+import re
 
 
 app = FastAPI(
     title="Applied Programmierung Course HS-Coburg",
-    description="Simple note management API",
-    version="1.0.0"
+    description="Note API with SQLite database and validation",
+    version="3.0.0"
 )
 
 
-####################################################################
-#### Day 1: Basic FastAPI Endpoints
-####################################################################
-
-@app.get("/")
-def root():
-    return {"message": "Hello, World!"}
+ALLOWED_CATEGORIES = {"work", "personal", "school", "ideas", "general"}
+TAG_PATTERN = re.compile(r"^[a-z0-9-]+$")
 
 
-@app.get("/status")
-def get_status():
-    return {
-        "status": "online",
-        "version": "0.1.0",
-        "day": 1
-    }
+# ============================================================================
+# Database Models
+# ============================================================================
+
+class NoteTagLink(SQLModel, table=True):
+    __tablename__ = "notelink"
+
+    note_id: Optional[int] = SQLField(
+        default=None,
+        foreign_key="notes.id",
+        primary_key=True
+    )
+    tag_id: Optional[int] = SQLField(
+        default=None,
+        foreign_key="tags.id",
+        primary_key=True
+    )
 
 
-@app.get("/about")
-def get_about():
-    return {
-        "project": "My First API",
-        "author": "Maryam",
-        "course": "Applied Programming"
-    }
+class Note(SQLModel, table=True):
+    __tablename__ = "notes"
 
-
-@app.get("/square/{number}")
-def calculate_square(number: int):
-    result = number * number
-
-    return {
-        "number": number,
-        "square": result,
-        "calculation": f"{number} × {number} = {result}"
-    }
-
-
-@app.get("/student")
-def student_info():
-    return {
-        "name": "Maryam",
-        "semester": 1,
-        "course": "Wirtschaftsinformatik",
-        "university": "HS Coburg"
-    }
-
-
-@app.get("/double/{number}")
-def double_numbers(number: int):
-    result = number * 2
-
-    return {
-        "number": number,
-        "double": result,
-        "calculation": f"{number} * 2 = {result}"
-    }
-
-
-####################################################################
-#### Day 2 and Day 3: Note API + Homework
-####################################################################
-
-class NoteCreate(BaseModel):
+    id: Optional[int] = SQLField(default=None, primary_key=True)
     title: str
     content: str
     category: str
-    tags: list[str] = []
+    created_at: datetime = SQLField(default_factory=datetime.now)
+
+    tags: list["Tag"] = Relationship(
+        back_populates="notes",
+        link_model=NoteTagLink
+    )
+
+
+class Tag(SQLModel, table=True):
+    __tablename__ = "tags"
+
+    id: Optional[int] = SQLField(default=None, primary_key=True)
+    name: str = SQLField(unique=True, index=True)
+
+    notes: list[Note] = Relationship(
+        back_populates="tags",
+        link_model=NoteTagLink
+    )
+
+    @field_validator("name")
+    @classmethod
+    def clean_tag_name(cls, value: str) -> str:
+        value = value.strip().lower()
+
+        if len(value) < 2:
+            raise ValueError("tag name must be at least 2 characters")
+
+        if len(value) > 30:
+            raise ValueError("tag name must be at most 30 characters")
+
+        if not TAG_PATTERN.match(value):
+            raise ValueError(
+                "tag name must contain only lowercase letters, digits, and dashes"
+            )
+
+        return value
+
+
+# ============================================================================
+# Database Setup
+# ============================================================================
+
+engine = create_engine("sqlite:///notes.db")
+
+SQLModel.metadata.create_all(engine)
+
+
+def get_session():
+    """Create a new database session for each request"""
+    with Session(engine) as session:
+        yield session
+
+
+SessionDep = Annotated[Session, Depends(get_session)]
+
+
+# ============================================================================
+# API Input / Output Models
+# ============================================================================
+
+class NoteCreate(BaseModel):
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        extra="forbid"
+    )
+
+    title: str = PydanticField(
+        min_length=3,
+        max_length=100,
+        description="Short note title",
+        examples=["Shopping list"]
+    )
+    content: str = PydanticField(
+        min_length=1,
+        max_length=10_000,
+        description="Note content",
+        examples=["Buy milk and bread"]
+    )
+    category: str = PydanticField(
+        min_length=2,
+        max_length=30,
+        pattern=r"^[a-zA-Z]+$",
+        description="Category: work, personal, school, ideas or general",
+        examples=["work"]
+    )
+    tags: list[str] = PydanticField(
+        default_factory=list,
+        max_length=10,
+        description="List of tags",
+        examples=[["work", "urgent"]]
+    )
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+
+        if len(value) < 3:
+            raise ValueError("title must be at least 3 characters")
+
+        return value
+
+    @field_validator("category")
+    @classmethod
+    def category_must_be_allowed(cls, value: str) -> str:
+        value = value.strip().lower()
+
+        if value not in ALLOWED_CATEGORIES:
+            raise ValueError(
+                f"category must be one of {sorted(ALLOWED_CATEGORIES)}"
+            )
+
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def clean_tags(cls, raw: list[str]) -> list[str]:
+        cleaned = []
+        seen = set()
+
+        for tag in raw:
+            tag = tag.strip().lower()
+
+            if not tag:
+                raise ValueError("tags must not be empty strings")
+
+            if len(tag) < 2:
+                raise ValueError("tags must be at least 2 characters")
+
+            if len(tag) > 30:
+                raise ValueError("tags must be at most 30 characters")
+
+            if not TAG_PATTERN.match(tag):
+                raise ValueError(
+                    "tags must contain only lowercase letters, digits, and dashes"
+                )
+
+            if tag in seen:
+                continue
+
+            seen.add(tag)
+            cleaned.append(tag)
+
+        return cleaned
+
 
 class NoteUpdate(BaseModel):
-    title: Optional[str] = None
-    content: Optional[str] = None
-    category: Optional[str] = None
-    tags: Optional[list[str]] = None
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        extra="forbid"
+    )
+
+    title: Optional[str] = PydanticField(
+        default=None,
+        min_length=3,
+        max_length=100
+    )
+    content: Optional[str] = PydanticField(
+        default=None,
+        min_length=1,
+        max_length=10_000
+    )
+    category: Optional[str] = PydanticField(
+        default=None,
+        min_length=2,
+        max_length=30,
+        pattern=r"^[a-zA-Z]+$"
+    )
+    tags: Optional[list[str]] = PydanticField(
+        default=None,
+        max_length=10
+    )
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+
+        value = value.strip()
+
+        if len(value) < 3:
+            raise ValueError("title must be at least 3 characters")
+
+        return value
+
+    @field_validator("category")
+    @classmethod
+    def category_must_be_allowed(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+
+        value = value.strip().lower()
+
+        if value not in ALLOWED_CATEGORIES:
+            raise ValueError(
+                f"category must be one of {sorted(ALLOWED_CATEGORIES)}"
+            )
+
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def clean_tags(cls, raw: Optional[list[str]]) -> Optional[list[str]]:
+        if raw is None:
+            return raw
+
+        cleaned = []
+        seen = set()
+
+        for tag in raw:
+            tag = tag.strip().lower()
+
+            if not tag:
+                raise ValueError("tags must not be empty strings")
+
+            if len(tag) < 2:
+                raise ValueError("tags must be at least 2 characters")
+
+            if len(tag) > 30:
+                raise ValueError("tags must be at most 30 characters")
+
+            if not TAG_PATTERN.match(tag):
+                raise ValueError(
+                    "tags must contain only lowercase letters, digits, and dashes"
+                )
+
+            if tag in seen:
+                continue
+
+            seen.add(tag)
+            cleaned.append(tag)
+
+        return cleaned
 
 
-class Note(BaseModel):
+class NoteResponse(BaseModel):
     id: int
     title: str
     content: str
     category: str
-    tags: list[str] = []
+    tags: list[str]
     created_at: str
 
-
-NOTES_FILE = Path("data/notes.json")
-
-
-def load_notes():
-    """Load notes from JSON file and return notes list and next ID counter"""
-    notes_db = []
-    notes_id_counter = 1
-
-    if NOTES_FILE.exists():
-        with open(NOTES_FILE, "r") as f:
-            data = json.load(f)
-            notes_db = [Note(**note) for note in data]
-
-            if notes_db:
-                notes_id_counter = max(note.id for note in notes_db) + 1
-
-    return notes_db, notes_id_counter
+    model_config = ConfigDict(from_attributes=True)
 
 
-def save_notes(notes_db):
-    """Save notes to JSON file after each change"""
-    NOTES_FILE.parent.mkdir(parents=True, exist_ok=True)
+# ============================================================================
+# Helper Functions
+# ============================================================================
 
-    with open(NOTES_FILE, "w") as f:
-        notes_data = [note.dict() for note in notes_db]
-        json.dump(notes_data, f, indent=2)
-
-
-@app.post("/notes", status_code=201)
-def create_note(note: NoteCreate) -> Note:
-    """Create a new note"""
-
-    notes_db, notes_id_counter = load_notes()
-
-    new_note = Note(
-        id=notes_id_counter,
+def note_to_response(note: Note) -> NoteResponse:
+    """Convert database Note object to response model"""
+    return NoteResponse(
+        id=note.id,
         title=note.title,
         content=note.content,
         category=note.category,
-        tags=note.tags,
-        created_at=datetime.now(timezone.utc).isoformat()
+        tags=[tag.name for tag in note.tags],
+        created_at=note.created_at.isoformat()
     )
 
-    notes_db.append(new_note)
-    save_notes(notes_db)
 
-    return new_note
+def validate_tag_name(tag_name: str) -> str:
+    """Validate and normalize a tag name before saving it"""
+    tag_name = tag_name.strip().lower()
+
+    if len(tag_name) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="tag name must be at least 2 characters"
+        )
+
+    if len(tag_name) > 30:
+        raise HTTPException(
+            status_code=422,
+            detail="tag name must be at most 30 characters"
+        )
+
+    if not TAG_PATTERN.match(tag_name):
+        raise HTTPException(
+            status_code=422,
+            detail="tag name must contain only lowercase letters, digits, and dashes"
+        )
+
+    return tag_name
+
+
+def get_or_create_tags(tag_names: list[str], session: Session) -> list[Tag]:
+    """Get existing tags or create new ones"""
+
+    tag_objects = []
+    seen_tags = set()
+
+    for tag_name in tag_names:
+        tag_name = validate_tag_name(tag_name)
+
+        if tag_name in seen_tags:
+            continue
+
+        seen_tags.add(tag_name)
+
+        statement = select(Tag).where(Tag.name == tag_name)
+        existing_tag = session.exec(statement).first()
+
+        if existing_tag:
+            tag_objects.append(existing_tag)
+        else:
+            new_tag = Tag(name=tag_name)
+            session.add(new_tag)
+            tag_objects.append(new_tag)
+
+    return tag_objects
+
+
+# ============================================================================
+# Basic Endpoint
+# ============================================================================
+
+@app.get("/")
+def root():
+    return {
+        "message": "Note API with SQLite database and validation is running"
+    }
+
+
+# ============================================================================
+# Notes Endpoints
+# ============================================================================
+
+@app.post("/notes", status_code=201)
+def create_note(note: NoteCreate, session: SessionDep) -> NoteResponse:
+    """Create a new note in database"""
+
+    db_note = Note(
+        title=note.title,
+        content=note.content,
+        category=note.category
+    )
+
+    tag_objects = get_or_create_tags(note.tags, session)
+    db_note.tags = tag_objects
+
+    session.add(db_note)
+    session.commit()
+    session.refresh(db_note)
+
+    return note_to_response(db_note)
 
 
 @app.get("/notes")
 def list_notes(
+    session: SessionDep,
     category: str = None,
     search: str = None,
     tag: str = None,
     created_after: str = None,
     created_before: str = None
-) -> list[Note]:
-    """Get a list of all notes with optional filters"""
+) -> list[NoteResponse]:
+    """List notes with optional filters"""
 
-    notes_db, _ = load_notes()
+    statement = select(Note)
 
-    filtered_notes = []
+    if category:
+        category = category.strip().lower()
+        statement = statement.where(Note.category == category)
 
-    for note in notes_db:
-        if category and note.category != category:
-            continue
+    if search:
+        search_lower = search.lower()
+        statement = statement.where(
+            or_(
+                col(Note.title).ilike(f"%{search_lower}%"),
+                col(Note.content).ilike(f"%{search_lower}%")
+            )
+        )
 
-        if search:
-            search_lower = search.lower()
-            title_match = search_lower in note.title.lower()
-            content_match = search_lower in note.content.lower()
+    if tag:
+        tag_lower = tag.lower().strip()
+        statement = statement.join(Note.tags).where(Tag.name == tag_lower)
 
-            if not (title_match or content_match):
-                continue
+    if created_after:
+        try:
+            created_after_date = datetime.fromisoformat(created_after)
+            statement = statement.where(Note.created_at >= created_after_date)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="created_after must be ISO format, for example 2026-05-01"
+            )
 
-        if tag and tag not in note.tags:
-            continue
+    if created_before:
+        try:
+            created_before_date = datetime.fromisoformat(created_before)
+            statement = statement.where(Note.created_at <= created_before_date)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="created_before must be ISO format, for example 2026-05-30"
+            )
 
-        if created_after and note.created_at < created_after:
-            continue
+    notes = session.exec(statement).all()
 
-        if created_before and note.created_at > created_before:
-            continue
+    return [note_to_response(note) for note in notes]
 
-        filtered_notes.append(note)
-
-    return filtered_notes
 
 @app.get("/notes/stats")
-def get_notes_stats():
+def get_notes_stats(session: SessionDep):
     """Get statistics about notes"""
 
-    notes_db, _ = load_notes()
+    notes = session.exec(select(Note)).all()
+    all_tags_from_table = session.exec(select(Tag)).all()
 
     categories = {}
     tags_count = {}
-    all_tags = set()
 
-    for note in notes_db:
+    for note in notes:
         if note.category in categories:
             categories[note.category] += 1
         else:
             categories[note.category] = 1
 
         for tag in note.tags:
-            all_tags.add(tag)
-
-            if tag in tags_count:
-                tags_count[tag] += 1
+            if tag.name in tags_count:
+                tags_count[tag.name] += 1
             else:
-                tags_count[tag] = 1
+                tags_count[tag.name] = 1
 
     sorted_tags = sorted(
         tags_count.items(),
@@ -227,209 +499,168 @@ def get_notes_stats():
         })
 
     return {
-        "total_notes": len(notes_db),
+        "total_notes": len(notes),
         "by_category": categories,
         "top_tags": top_tags,
-        "unique_tags_count": len(all_tags)
+        "unique_tags_count": len(all_tags_from_table)
     }
 
 
 @app.get("/notes/{note_id}")
-def get_note(note_id: int) -> Note:
+def get_note(note_id: int, session: SessionDep) -> NoteResponse:
     """Get a specific note by ID"""
 
-    notes_db, _ = load_notes()
+    note = session.get(Note, note_id)
 
-    for note in notes_db:
-        if note.id == note_id:
-            return note
+    if not note:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Note with ID {note_id} not found"
+        )
 
-    raise HTTPException(
-        status_code=404,
-        detail=f"Note with ID {note_id} not found"
-    )
+    return note_to_response(note)
 
 
 @app.put("/notes/{note_id}")
-def update_note(note_id: int, note_update: NoteCreate) -> Note:
+def update_note(
+    note_id: int,
+    note_update: NoteCreate,
+    session: SessionDep
+) -> NoteResponse:
     """Update an existing note"""
 
-    notes_db, _ = load_notes()
+    note = session.get(Note, note_id)
 
-    for i, note in enumerate(notes_db):
-        if note.id == note_id:
-            updated_note = Note(
-                id=note.id,
-                title=note_update.title,
-                content=note_update.content,
-                category=note_update.category,
-                tags=note_update.tags,
-                created_at=note.created_at
-            )
+    if not note:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Note with ID {note_id} not found"
+        )
 
-            notes_db[i] = updated_note
-            save_notes(notes_db)
+    note.title = note_update.title
+    note.content = note_update.content
+    note.category = note_update.category
+    note.tags = get_or_create_tags(note_update.tags, session)
 
-            return updated_note
+    session.add(note)
+    session.commit()
+    session.refresh(note)
 
-    raise HTTPException(
-        status_code=404,
-        detail=f"Note with ID {note_id} not found"
-    )
+    return note_to_response(note)
+
 
 @app.patch("/notes/{note_id}")
-def partial_update_note(note_id: int, note_update: NoteUpdate) -> Note:
+def partial_update_note(
+    note_id: int,
+    note_update: NoteUpdate,
+    session: SessionDep
+) -> NoteResponse:
     """Partially update a note"""
 
-    notes_db, _ = load_notes()
+    note = session.get(Note, note_id)
 
-    for i, note in enumerate(notes_db):
-        if note.id == note_id:
-            updated_note = Note(
-                id=note.id,
-                title=note_update.title if note_update.title is not None else note.title,
-                content=note_update.content if note_update.content is not None else note.content,
-                category=note_update.category if note_update.category is not None else note.category,
-                tags=note_update.tags if note_update.tags is not None else note.tags,
-                created_at=note.created_at
-            )
+    if not note:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Note with ID {note_id} not found"
+        )
 
-            notes_db[i] = updated_note
-            save_notes(notes_db)
+    if note_update.title is not None:
+        note.title = note_update.title
 
-            return updated_note
+    if note_update.content is not None:
+        note.content = note_update.content
 
-    raise HTTPException(
-        status_code=404,
-        detail=f"Note with ID {note_id} not found"
-    )
+    if note_update.category is not None:
+        note.category = note_update.category
+
+    if note_update.tags is not None:
+        note.tags = get_or_create_tags(note_update.tags, session)
+
+    session.add(note)
+    session.commit()
+    session.refresh(note)
+
+    return note_to_response(note)
 
 
 @app.delete("/notes/{note_id}", status_code=204)
-def delete_note(note_id: int):
+def delete_note(note_id: int, session: SessionDep):
     """Delete a note"""
 
-    notes_db, _ = load_notes()
+    note = session.get(Note, note_id)
 
-    for i, note in enumerate(notes_db):
-        if note.id == note_id:
-            notes_db.pop(i)
-            save_notes(notes_db)
-            return
+    if not note:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Note with ID {note_id} not found"
+        )
 
-    raise HTTPException(
-        status_code=404,
-        detail=f"Note with ID {note_id} not found"
-    )
+    session.delete(note)
+    session.commit()
 
+    return
+
+
+# ============================================================================
+# Tag Endpoints
+# ============================================================================
 
 @app.get("/tags")
-def list_tags() -> list[str]:
-    """Get all unique tags from all notes"""
+def list_tags(session: SessionDep) -> list[str]:
+    """Get all unique tags from the Tag table"""
 
-    notes_db, _ = load_notes()
+    statement = select(Tag)
+    tags = session.exec(statement).all()
 
-    all_tags = set()
-
-    for note in notes_db:
-        for tag in note.tags:
-            all_tags.add(tag)
-
-    return sorted(list(all_tags))
+    return sorted([tag.name for tag in tags])
 
 
 @app.get("/tags/{tag_name}/notes")
-def get_notes_by_tag(tag_name: str) -> list[Note]:
-    """Get all notes with a specific tag"""
+def get_notes_by_tag(
+    tag_name: str,
+    session: SessionDep
+) -> list[NoteResponse]:
+    """Get all notes with specific tag"""
 
-    notes_db, _ = load_notes()
+    tag_lower = tag_name.lower().strip()
 
-    filtered_notes = []
+    statement = select(Tag).where(Tag.name == tag_lower)
+    tag = session.exec(statement).first()
 
-    for note in notes_db:
-        if tag_name in note.tags:
-            filtered_notes.append(note)
+    if not tag:
+        return []
 
-    return filtered_notes
+    return [
+        note_to_response(note)
+        for note in tag.notes
+    ]
 
+
+# ============================================================================
+# Category Endpoints
+# ============================================================================
 
 @app.get("/categories")
-def list_categories() -> list[str]:
+def list_categories(session: SessionDep) -> list[str]:
     """Get all unique categories from all notes"""
 
-    notes_db, _ = load_notes()
+    statement = select(Note.category)
+    categories = session.exec(statement).all()
 
-    categories = set()
-
-    for note in notes_db:
-        categories.add(note.category)
-
-    return sorted(list(categories))
+    return sorted(list(set(categories)))
 
 
 @app.get("/categories/{category_name}/notes")
-def get_notes_by_category_name(category_name: str) -> list[Note]:
+def get_notes_by_category_name(
+    category_name: str,
+    session: SessionDep
+) -> list[NoteResponse]:
     """Get all notes in a specific category"""
 
-    notes_db, _ = load_notes()
+    category_name = category_name.strip().lower()
 
-    filtered_notes = []
+    statement = select(Note).where(Note.category == category_name)
+    notes = session.exec(statement).all()
 
-    for note in notes_db:
-        if note.category == category_name:
-            filtered_notes.append(note)
-
-    return filtered_notes
-
-
-####################################################################
-#### Day 3: Query Parameter Practice
-####################################################################
-
-@app.get("/queryparameters")
-def query_parameters(param1: str = "", param2: int = None) -> dict:
-    namen = ["Maryam", "Max", "Mina", "Ali", "Fati"]
-    namen_gefiltert = []
-
-    if not param1:
-        return {
-            "param1": param1,
-            "param2": param2,
-            "namen": namen
-        }
-
-    for name in namen:
-        if param1.lower() in name.lower():
-            namen_gefiltert.append(name)
-
-    return {
-        "param1": param1,
-        "param2": param2,
-        "namen": namen_gefiltert
-    }
-
-
-####################################################################
-#### Day 3: Test Endpoints for Path Parameters
-####################################################################
-
-@app.get("/test/123")
-def test_fixed():
-    return {
-        "message": "Hello, you!"
-    }
-
-
-@app.get("/test/{name}/test2/{city}")
-def test_two_values(name: str, city: str):
-    return {
-        "name": name,
-        "city": city
-    }
-
-
-@app.get("/test/{value}")
-def test_value(value: str):
-    return {
-        "value": value
-    }
+    return [note_to_response(note) for note in notes]
