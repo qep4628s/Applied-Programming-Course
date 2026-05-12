@@ -1,0 +1,16 @@
+[project]
+name = "applied-programming-course"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "faker>=40.15.0",
+    "fastapi[standard]>=0.136.1",
+    "icecream>=2.2.0",
+    "pytest>=9.0.3",
+    "requests>=2.33.1",
+    "sqlmodel>=0.0.38",
+    "streamlit>=1.57.0",
+    "typing-extensions>=4.15.0",
+]
