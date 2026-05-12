@@ -188,30 +188,34 @@ Nach der Korrektur haben alle 8 Tests bestanden. Dadurch habe ich besser verstan
 ### Day 6
 
 #### 1. ✅ What did I accomplish?
+Heute habe ich an der Test-Suite für meine Notes API gearbeitet. Außerdem habe ich geprüft, welche Teile von meinem Projekt noch fehlen oder verbessert werden müssen.
 
+Zuerst habe ich die Datei test_main.py benutzt und die Tests mit pytest ausgeführt. Am Anfang haben nicht alle Tests funktioniert. Einige Fehler hatten mit Tags, Datum-Filtern und der SQLite-Datenbank zu tun.
 
-
-
-
-
+Ich habe die Fehlermeldungen Schritt für Schritt gelesen und die Fehler in meiner API verbessert.
 ---
 
 #### 2. 🚧 What challenges did I face?
+Am Anfang haben nur ungefähr 50 von 70 Tests funktioniert. Ein konkreter Fehler war bei den Tags. In einem Test wurden Tags wie "URGENT", "urgent" und " meeting " an die API geschickt. Die Test-Suite erwartete, dass daraus nur saubere Tags wie `"urgent"
+` und "meeting" werden.
 
+Bei mir wurden die Tags am Anfang aber nicht richtig bereinigt. Teilweise blieben Großbuchstaben, Leerzeichen oder doppelte Tags erhalten.
 
+Ein weiterer Fehler war bei den Datumsfiltern created_after und created_before. Wenn ein falsches Datum geschickt wurde, erwarteten die Tests den Status Code 422. Mein Code hat aber zuerst einen anderen Status Code zurückgegeben.
 
-
-
-
+Außerdem gab es ein Problem bei /notes/stats, weil die Anzahl der Tags nicht immer zur Antwort von /tags gepasst hat.
 ---
 
 #### 3. 💡 How did I overcome them?
+Ich habe die Fehlermeldungen von pytest einzeln gelesen und danach die passenden Stellen in main.py geändert.
 
+Für das Tag-Problem habe ich die Tag-Validierung angepasst. Tags werden jetzt mit .strip() bereinigt, mit .lower() klein geschrieben und doppelte Tags werden entfernt.
 
+Für die Datumsfilter habe ich den Fehlerfall angepasst, damit ungültige Datumswerte mit Status Code `422` beantwortet werden.
 
+Bei /notes/stats habe ich die Berechnung der einzigartigen Tags angepasst, damit sie zur /tags-Liste passt.
 
-
-
+Nach jeder Änderung habe ich die Tests wieder ausgeführt. Am Ende hat die komplette Test-Suite funktioniert
 ---
 
 ## Week 3
@@ -219,30 +223,21 @@ Nach der Korrektur haben alle 8 Tests bestanden. Dadurch habe ich besser verstan
 ### Day 7
 
 #### 1. ✅ What did I accomplish?
+Heute habe ich ein einfaches Frontend mit Streamlit für meine Notes API erstellt.
 
+Das Frontend kann die Notes aus meiner API laden und anzeigen. Es zeigt den Titel, den Inhalt, die Kategorie und die Tags einer Note an.
 
-
-
-
-
+Außerdem habe ich ein Formular eingebaut, mit dem man eine neue Note erstellen kann. Die neue Note wird dann an meine FastAPI API geschickt und in der Datenbank gespeichert.
 ---
 
 #### 2. 🚧 What challenges did I face?
+Ein konkretes Problem war, dass sehr viele alte Testdaten in meiner Datenbank waren. Dadurch wurden im Frontend zu viele Notes angezeigt und die Seite war unübersichtlich.
 
-
-
-
-
-
+Außerdem musste ich darauf achten, dass die Tags aus dem Formular richtig an die API geschickt werden. Die Tags werden im Frontend als Text eingegeben, zum Beispiel "urgent, meeting", aber die API erwartet eine Liste von Tags.
 ---
 
 #### 3. 💡 How did I overcome them?
-
-
-
-
-
-
+einfach nochmal das korrigiert. :)
 ---
 
 ### Day 8
